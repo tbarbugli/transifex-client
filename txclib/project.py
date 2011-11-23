@@ -5,6 +5,9 @@ import getpass
 import os
 import re
 import fnmatch
+import gevent
+from gevent import monkey
+monkey.patch_all()
 import urllib2
 import datetime, time
 import ConfigParser
@@ -285,132 +288,135 @@ class Project(object):
         Pull all translations file from transifex server
         """
         self.minimum_perc = minimum_perc
-        resource_list = self.get_chosen_resources(resources)
-
+        _locals = locals()
+        if resources:
+            resource_list = resources
+        else:
+            resource_list = self.get_resource_list()
+        api_calls = []
         for resource in resource_list:
-            logger.debug("Handling resource %s" % resource)
-            self.resource = resource
-            project_slug, resource_slug = resource.split('.')
-            files = self.get_resource_files(resource)
-            slang = self.get_resource_option(resource, 'source_lang')
-            sfile = self.get_resource_option(resource, 'source_file')
-            lang_map = self.get_resource_lang_mapping(resource)
-            host = self.get_resource_host(resource)
-            logger.debug("Language mapping is: %s" % lang_map)
-            self.url_info = {
-                'host': host,
-                'project': project_slug,
-                'resource': resource_slug
-            }
-            logger.debug("URL data are: %s" % self.url_info)
+            api_calls.append(gevent.spawn(self.single_pull, languages, resource, overwrite, fetchall, fetchsource, force, skip))
+        gevent.joinall(api_calls)
 
-            stats = self._get_stats_for_resource()
+    def single_pull(self, languages, resource, overwrite, fetchall, fetchsource, force, skip):
+        logger.debug("Handling resource %s" % resource)
+        self.resource = resource
+        project_slug, resource_slug = resource.split('.')
+        files = self.get_resource_files(resource)
+        slang = self.get_resource_option(resource, 'source_lang')
+        sfile = self.get_resource_option(resource, 'source_file')
+        lang_map = self.get_resource_lang_mapping(resource)
+        host = self.get_resource_host(resource)
+        logger.debug("Language mapping is: %s" % lang_map)
+        self.url_info = {
+            'host': host,
+            'project': project_slug,
+            'resource': resource_slug
+        }
+        logger.debug("URL data are: %s" % self.url_info)
 
-            try:
-                file_filter = self.config.get(resource, 'file_filter')
-            except ConfigParser.NoOptionError:
-                file_filter = None
+        stats = self._get_stats_for_resource()
 
-            # Pull source file
-            pull_languages = set([])
-            new_translations = set([])
+        try:
+            file_filter = self.config.get(resource, 'file_filter')
+        except ConfigParser.NoOptionError:
+            file_filter = None
 
-            if fetchall:
-                new_translations = self._new_translations_to_add(
-                    files, slang, lang_map, stats, force
-                )
-                if new_translations:
-                    MSG("New translations found for the following languages: %s" %
-                        ', '.join(new_translations))
+        # Pull source file
+        pull_languages = set([])
+        new_translations = set([])
 
-            existing, new = self._languages_to_pull(
-                languages, files, lang_map, stats, force
+        if fetchall:
+            new_translations = self._new_translations_to_add(
+                files, slang, lang_map, stats, force
             )
-            pull_languages |= existing
-            new_translations |= new
-            logger.debug("Adding to new translations: %s" % new)
+            if new_translations:
+                MSG("New translations found for the following languages: %s" %
+                    ', '.join(new_translations))
 
-            if fetchsource:
-                if sfile and slang not in pull_languages:
-                    pull_languages.append(slang)
-                elif slang not in new_translations:
-                    new_translations.append(slang)
+        existing, new = self._languages_to_pull(
+            languages, files, lang_map, stats, force
+        )
+        pull_languages |= existing
+        new_translations |= new
+        logger.debug("Adding to new translations: %s" % new)
 
-            if pull_languages:
-                logger.debug("Pulling languages for: %s" % pull_languages)
-                MSG("Pulling translations for resource %s (source: %s)" %
-                    (resource, sfile))
+        if fetchsource:
+            if sfile and slang not in pull_languages:
+                pull_languages.append(slang)
+            elif slang not in new_translations:
+                new_translations.append(slang)
 
-            for lang in pull_languages:
-                local_lang = lang
-                if lang in lang_map.values():
-                    remote_lang = lang_map.flip[lang]
+        for lang in pull_languages:
+            local_lang = lang
+            if lang in lang_map.values():
+                remote_lang = lang_map.flip[lang]
+            else:
+                remote_lang = lang
+            if languages and lang not in pull_languages:
+                logger.debug("Skipping language %s" % lang)
+                continue
+            if lang != slang:
+                local_file = files.get(lang, None) or files[lang_map[lang]]
+            else:
+                local_file = sfile
+            logger.debug("Using file %s" % local_file)
+
+            kwargs = {
+                'lang': remote_lang,
+                'stats': stats,
+                'local_file': local_file,
+                'force': force,
+            }
+            if not self._should_update_translation(**kwargs):
+                msg = "Skipping '%s' translation (file: %s)."
+                MSG(msg % (color_text(remote_lang, "RED"), local_file))
+                continue
+
+            if not overwrite:
+                local_file = ("%s.new" % local_file)
+            MSG(" -> %s: %s" % (color_text(remote_lang,"RED"), local_file))
+            try:
+                r = self.do_url_request('pull_file', language=remote_lang)
+            except Exception,e:
+                if not skip:
+                    raise e
                 else:
-                    remote_lang = lang
-                if languages and lang not in pull_languages:
-                    logger.debug("Skipping language %s" % lang)
+                    ERRMSG(e)
                     continue
-                if lang != slang:
-                    local_file = files.get(lang, None) or files[lang_map[lang]]
+            base_dir = os.path.split(local_file)[0]
+            mkdir_p(base_dir)
+            fd = open(local_file, 'wb')
+            fd.write(r)
+            fd.close()
+
+        if new_translations:
+            MSG("Pulling new translations for resource %s (source: %s)" %
+            (resource, sfile))
+            for lang in new_translations:
+                if lang in lang_map.keys():
+                    local_lang = lang_map[lang]
                 else:
-                    local_file = sfile
-                logger.debug("Using file %s" % local_file)
+                    local_lang = lang
+                remote_lang = lang
+                if file_filter:
+                    local_file = relpath(os.path.join(self.root,
+                        file_filter.replace('<lang>', local_lang)), os.curdir)
+                else:
+                    trans_dir = os.path.join(self.root, ".tx", resource)
+                    if not os.path.exists(trans_dir):
+                        os.mkdir(trans_dir)
+                    local_file = relpath(os.path.join(trans_dir, '%s_translation' %
+                        local_lang, os.curdir))
 
-                kwargs = {
-                    'lang': remote_lang,
-                    'stats': stats,
-                    'local_file': local_file,
-                    'force': force,
-                }
-                if not self._should_update_translation(**kwargs):
-                    msg = "Skipping '%s' translation (file: %s)."
-                    MSG(msg % (color_text(remote_lang, "RED"), local_file))
-                    continue
+                MSG(" -> %s: %s" % (color_text(remote_lang, "RED"), local_file))
+                r = self.do_url_request('pull_file', language=remote_lang)
 
-                if not overwrite:
-                    local_file = ("%s.new" % local_file)
-                MSG(" -> %s: %s" % (color_text(remote_lang,"RED"), local_file))
-                try:
-                    r = self.do_url_request('pull_file', language=remote_lang)
-                except Exception,e:
-                    if not skip:
-                        raise e
-                    else:
-                        ERRMSG(e)
-                        continue
                 base_dir = os.path.split(local_file)[0]
                 mkdir_p(base_dir)
                 fd = open(local_file, 'wb')
                 fd.write(r)
                 fd.close()
-
-            if new_translations:
-                MSG("Pulling new translations for resource %s (source: %s)" %
-                (resource, sfile))
-                for lang in new_translations:
-                    if lang in lang_map.keys():
-                        local_lang = lang_map[lang]
-                    else:
-                        local_lang = lang
-                    remote_lang = lang
-                    if file_filter:
-                        local_file = relpath(os.path.join(self.root,
-                            file_filter.replace('<lang>', local_lang)), os.curdir)
-                    else:
-                        trans_dir = os.path.join(self.root, ".tx", resource)
-                        if not os.path.exists(trans_dir):
-                            os.mkdir(trans_dir)
-                        local_file = relpath(os.path.join(trans_dir, '%s_translation' %
-                            local_lang, os.curdir))
-
-                    MSG(" -> %s: %s" % (color_text(remote_lang, "RED"), local_file))
-                    r = self.do_url_request('pull_file', language=remote_lang)
-
-                    base_dir = os.path.split(local_file)[0]
-                    mkdir_p(base_dir)
-                    fd = open(local_file, 'wb')
-                    fd.write(r)
-                    fd.close()
 
     def push(self, source=False, translations=False, force=False, resources=[], languages=[],
         skip=False, no_interactive=False):
@@ -591,7 +597,6 @@ class Project(object):
         opener = None
         headers = None
         req = None
-
         if multipart:
             opener = urllib2.build_opener(MultipartPostHandler)
             for info,filename in files:
@@ -613,8 +618,10 @@ class Project(object):
         try:
             fh = urllib2.urlopen(req)
         except urllib2.HTTPError, e:
+	    print e.code
             if e.code in [401, 403, 404]:
-                raise e
+                print e.code
+		raise e
             else:
                 # For other requests, we should print the message as well
                 raise Exception("Remote server replied: %s" % e.read())

@@ -23,7 +23,7 @@ package_data = {
 
 scripts = ['tx']
 
-install_requires = []
+install_requires = ['gevent']
 try:
     import json
 except ImportError:
