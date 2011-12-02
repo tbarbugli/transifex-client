@@ -6,8 +6,9 @@ import os
 import re
 import fnmatch
 import gevent
-from gevent import monkey
-monkey.patch_all()
+from gevent import monkey;monkey.patch_all()
+from gevent import pool
+
 import urllib2
 import datetime, time
 import ConfigParser
@@ -18,6 +19,9 @@ from txclib.urls import API_URLS
 from txclib.config import OrderedRawConfigParser, Flipdict
 from txclib.log import logger
 
+#TODO make PUSH REQUEST IN PARALLEL
+
+PARALLEL_API_REQUESTS = 16
 
 class ProjectNotInit(Exception):
     pass
@@ -287,20 +291,19 @@ class Project(object):
         """
         Pull all translations file from transifex server
         """
+        api_pool = pool.Pool(PARALLEL_API_REQUESTS)
         self.minimum_perc = minimum_perc
         _locals = locals()
         if resources:
             resource_list = resources
         else:
             resource_list = self.get_resource_list()
-        api_calls = []
         for resource in resource_list:
-            api_calls.append(gevent.spawn(self.single_pull, languages, resource, overwrite, fetchall, fetchsource, force, skip))
-        gevent.joinall(api_calls)
+            api_pool.spawn(self.single_pull, languages, resource, overwrite, fetchall, fetchsource, force, skip)
+        api_pool.join()
 
     def single_pull(self, languages, resource, overwrite, fetchall, fetchsource, force, skip):
         logger.debug("Handling resource %s" % resource)
-        self.resource = resource
         project_slug, resource_slug = resource.split('.')
         files = self.get_resource_files(resource)
         slang = self.get_resource_option(resource, 'source_lang')
@@ -308,12 +311,12 @@ class Project(object):
         lang_map = self.get_resource_lang_mapping(resource)
         host = self.get_resource_host(resource)
         logger.debug("Language mapping is: %s" % lang_map)
-        self.url_info = {
+        url_info = {
             'host': host,
             'project': project_slug,
             'resource': resource_slug
         }
-        logger.debug("URL data are: %s" % self.url_info)
+        logger.debug("URL data are: %s" % url_info)
 
         stats = self._get_stats_for_resource()
 
@@ -377,7 +380,7 @@ class Project(object):
                 local_file = ("%s.new" % local_file)
             MSG(" -> %s: %s" % (color_text(remote_lang,"RED"), local_file))
             try:
-                r = self.do_url_request('pull_file', language=remote_lang)
+                r = self.do_url_request('pull_file', language=remote_lang, url_info=url_info)
             except Exception,e:
                 if not skip:
                     raise e
@@ -578,7 +581,8 @@ class Project(object):
         Issues a url request.
         """
         # Read the credentials from the config file (.transifexrc)
-        host = self.url_info['host']
+        url_info = getattr(self, 'url_info', kwargs['url_info'])
+        host = url_info['host']
         try:
             username = self.txrc.get(host, 'username')
             passwd = self.txrc.get(host, 'password')
@@ -591,7 +595,7 @@ class Project(object):
 
         # Create the Url
         kwargs['hostname'] = hostname
-        kwargs.update(self.url_info)
+        kwargs.update(url_info)
         url = (API_URLS[api_call] % kwargs).encode('UTF-8')
 
         opener = None
@@ -618,7 +622,6 @@ class Project(object):
         try:
             fh = urllib2.urlopen(req)
         except urllib2.HTTPError, e:
-	    print e.code
             if e.code in [401, 403, 404]:
                 print e.code
 		raise e
