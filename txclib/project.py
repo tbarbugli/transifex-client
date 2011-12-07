@@ -1,11 +1,9 @@
 # -*- coding: utf-8 -*-
 import base64
-import copy
 import getpass
+import fnmatch
 import os
 import re
-import fnmatch
-import gevent
 from gevent import monkey;monkey.patch_all()
 from gevent import pool
 
@@ -13,11 +11,21 @@ import urllib2
 import datetime, time
 import ConfigParser
 
-from txclib.web import *
-from txclib.utils import *
-from txclib.urls import API_URLS
-from txclib.config import OrderedRawConfigParser, Flipdict
+from txclib.config import OrderedRawConfigParser
+from txclib.config import Flipdict
 from txclib.log import logger
+from txclib.urls import API_URLS
+from txclib.utils import color_text
+from txclib.utils import ERRMSG
+from txclib.utils import FILE_EXTENSIONS
+from txclib.utils import find_dot_tx
+from txclib.utils import mkdir_p
+from txclib.utils import MSG
+from txclib.utils import parse_json
+from txclib.utils import regex_from_filefilter
+from txclib.utils import relpath
+from txclib.web import MultipartPostHandler
+from txclib.web import RequestWithMethod
 
 #TODO make PUSH REQUEST IN PARALLEL
 
@@ -318,7 +326,7 @@ class Project(object):
         }
         logger.debug("URL data are: %s" % url_info)
 
-        stats = self._get_stats_for_resource()
+        stats = self._get_stats_for_resource(url_info)
 
         try:
             file_filter = self.config.get(resource, 'file_filter')
@@ -380,7 +388,7 @@ class Project(object):
                 local_file = ("%s.new" % local_file)
             MSG(" -> %s: %s" % (color_text(remote_lang,"RED"), local_file))
             try:
-                r = self.do_url_request('pull_file', language=remote_lang, url_info=url_info)
+                r = self.do_url_request('pull_file', url_info, language=remote_lang)
             except Exception,e:
                 if not skip:
                     raise e
@@ -413,7 +421,7 @@ class Project(object):
                         local_lang, os.curdir))
 
                 MSG(" -> %s: %s" % (color_text(remote_lang, "RED"), local_file))
-                r = self.do_url_request('pull_file', language=remote_lang)
+                r = self.do_url_request('pull_file', url_info, language=remote_lang)
 
                 base_dir = os.path.split(local_file)[0]
                 mkdir_p(base_dir)
@@ -437,7 +445,7 @@ class Project(object):
             host = self.get_resource_host(resource)
             logger.debug("Language mapping is: %s" % lang_map)
             logger.debug("Using host %s" % host)
-            self.url_info = {
+            url_info = {
                 'host': host,
                 'project': project_slug,
                 'resource': resource_slug
@@ -445,7 +453,7 @@ class Project(object):
 
             MSG("Pushing translations for resource %s:" % resource)
 
-            stats = self._get_stats_for_resource()
+            stats = self._get_stats_for_resource(url_info)
 
             if force and not no_interactive:
                 answer = raw_input("Warning: By using --force, the uploaded"
@@ -467,7 +475,7 @@ class Project(object):
                 try:
                     MSG("Pushing source file (%s)" % sfile)
                     self.do_url_request(
-                        'push_source', multipart=True, method="PUT",
+                        'push_source', url_info, multipart=True, method="PUT",
                         files=[(
                                 "%s;%s" % (resource_slug, slang)
                                 , self.get_full_path(sfile)
@@ -480,7 +488,7 @@ class Project(object):
                         ERRMSG(e)
             else:
                 try:
-                    self.do_url_request('resource_details')
+                    self.do_url_request('resource_details', url_info)
                 except Exception, e:
                     code = getattr(e, 'code', None)
                     if code == 404:
@@ -528,7 +536,7 @@ class Project(object):
                     MSG("Pushing '%s' translations (file: %s)" % (color_text(remote_lang, "RED"), local_file))
                     try:
                         self.do_url_request(
-                            'push_translation', multipart=True, method='PUT',
+                            'push_translation', url_info, multipart=True, method='PUT',
                             files=[(
                                     "%s;%s" % (resource_slug, remote_lang),
                                     self.get_full_path(local_file)
@@ -551,12 +559,12 @@ class Project(object):
             lang_map = self.get_resource_lang_mapping(resource)
             host = self.get_resource_host(resource)
 
-            self.url_info = {
+            url_info = {
                 'host': host,
                 'project': project_slug,
                 'resource': resource_slug
             }
-            logger.debug("URL data are: %s" % self.url_info)
+            logger.debug("URL data are: %s" % url_info)
 
             MSG("Deleting translations for resource %s:" % resource)
             if not languages:
@@ -565,7 +573,7 @@ class Project(object):
             for language in languages:
                 try:
                     self.do_url_request(
-                        'delete_translation', language=language, method="DELETE"
+                        'delete_translation', url_info, language=language, method="DELETE"
                     )
                     msg = "Deleted language %s from resource %s in project %s."
                     MSG(msg % (language, resource_slug, project_slug))
@@ -575,15 +583,12 @@ class Project(object):
                     if not skip:
                         raise
 
-    def do_url_request(self, api_call, multipart=False, data=None,
+    def do_url_request(self, api_call, url_info, multipart=False, data=None,
                        files=[], encoding=None, method="GET", **kwargs):
         """
         Issues a url request.
         """
         # Read the credentials from the config file (.transifexrc)
-        url_info = getattr(self, 'url_info')
-        if 'url_info' in kwargs:
-            url_info = kwargs['url_info']
         host = url_info['host']
         try:
             username = self.txrc.get(host, 'username')
@@ -625,8 +630,7 @@ class Project(object):
             fh = urllib2.urlopen(req)
         except urllib2.HTTPError, e:
             if e.code in [401, 403, 404]:
-                print e.code
-		raise e
+                raise e
             else:
                 # For other requests, we should print the message as well
                 raise Exception("Remote server replied: %s" % e.read())
@@ -858,10 +862,10 @@ class Project(object):
                 new_translations.append(lang)
         return set(new_translations)
 
-    def _get_stats_for_resource(self):
+    def _get_stats_for_resource(self, url_info):
         """Get the statistics information for a resource."""
         try:
-            r = self.do_url_request('resource_stats')
+            r = self.do_url_request('resource_stats', url_info)
             logger.debug("Statistics response is %s" % r)
             stats = parse_json(r)
         except Exception,e:
