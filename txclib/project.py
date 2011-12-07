@@ -581,7 +581,9 @@ class Project(object):
         Issues a url request.
         """
         # Read the credentials from the config file (.transifexrc)
-        url_info = getattr(self, 'url_info', kwargs['url_info'])
+        url_info = getattr(self, 'url_info')
+        if 'url_info' in kwargs:
+            url_info = kwargs['url_info']
         host = url_info['host']
         try:
             username = self.txrc.get(host, 'username')
