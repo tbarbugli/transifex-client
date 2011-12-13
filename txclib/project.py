@@ -339,14 +339,14 @@ class Project(object):
 
         if fetchall:
             new_translations = self._new_translations_to_add(
-                files, slang, lang_map, stats, force
+                files, slang, lang_map, resource, stats, force
             )
             if new_translations:
                 MSG("New translations found for the following languages: %s" %
                     ', '.join(new_translations))
 
         existing, new = self._languages_to_pull(
-            languages, files, lang_map, stats, force
+            languages, files, lang_map, resource, stats, force
         )
         pull_languages |= existing
         new_translations |= new
@@ -378,6 +378,7 @@ class Project(object):
                 'stats': stats,
                 'local_file': local_file,
                 'force': force,
+                'resource': resource
             }
             if not self._should_update_translation(**kwargs):
                 msg = "Skipping '%s' translation (file: %s)."
@@ -643,7 +644,7 @@ class Project(object):
         return raw
 
 
-    def _should_update_translation(self, lang, stats, local_file, force=False):
+    def _should_update_translation(self, lang, stats, local_file, resource, force=False):
         """Whether a translation should be udpated from Transifex.
 
         We use the following criteria for that:
@@ -660,9 +661,9 @@ class Project(object):
         Returns:
             True or False.
         """
-        return self._should_download(lang, stats, local_file, force)
+        return self._should_download(lang, stats, resource, local_file, force)
 
-    def _should_add_translation(self, lang, stats, force=False):
+    def _should_add_translation(self, lang, stats, resource, force=False):
         """Whether a translation should be added from Transifex.
 
         We use the following criteria for that:
@@ -677,9 +678,9 @@ class Project(object):
         Returns:
             True or False.
         """
-        return self._should_download(lang, stats, None, force)
+        return self._should_download(lang, stats, resource, None, force)
 
-    def _should_download(self, lang, stats, local_file=None, force=False):
+    def _should_download(self, lang, stats, resource, local_file=None, force=False):
         """Return whether a translation should be downloaded.
 
         If local_file is None, skip the timestamps check (the file does
@@ -700,7 +701,7 @@ class Project(object):
                 logger.debug("Local is newer than remote for lang %s" % lang)
                 return False
 
-        return self._satisfies_min_translated(lang_stats)
+        return self._satisfies_min_translated(lang_stats, resource)
 
     def _should_push_translation(self, lang, stats, local_file, force=False):
         """Return whether a local translation file should be
@@ -763,7 +764,7 @@ class Project(object):
             return None
         return time.mktime(time.gmtime(os.path.getmtime(path)))
 
-    def _satisfies_min_translated(self, stats):
+    def _satisfies_min_translated(self, stats, resource):
         """Check whether a translation fulfills the filter used for
         minimum translated percentage.
 
@@ -782,7 +783,7 @@ class Project(object):
             )
             resource_minimum = int(
                 self.get_resource_option(
-                    self.resource, option_name
+                    resource, option_name
                 ) or global_minimum
             )
             minimum_percent = resource_minimum
@@ -840,7 +841,7 @@ class Project(object):
         except KeyError, e:
             return None
 
-    def _new_translations_to_add(self, files, slang, lang_map,
+    def _new_translations_to_add(self, files, slang, lang_map, resource,
                                  stats, force=False):
         """Return a list of translations which are new to the
         local installation.
@@ -858,7 +859,7 @@ class Project(object):
             )
             if lang_exists or lang_is_source or mapped_lang_exists:
                 continue
-            if self._should_add_translation(lang, stats, force):
+            if self._should_add_translation(lang, stats, resource, force):
                 new_translations.append(lang)
         return set(new_translations)
 
@@ -901,7 +902,7 @@ class Project(object):
         logger.debug("Operating on resources: %s" % selected_resources)
         return selected_resources
 
-    def _languages_to_pull(self, languages, files, lang_map, stats, force):
+    def _languages_to_pull(self, languages, files, lang_map, resource, stats, force):
         """Get a set of langauges to pull.
 
         Args:
@@ -926,7 +927,7 @@ class Project(object):
             f_langs = files.keys()
             for l in languages:
                 if l not in f_langs and not (l in lang_map and lang_map[l] in f_langs):
-                    if self._should_add_translation(l, stats, force):
+                    if self._should_add_translation(l, stats, resource, force):
                         new_translations.append(l)
                 else:
                     if l in lang_map.keys():
