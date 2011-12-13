@@ -1,4 +1,5 @@
 import os, sys, re, errno
+from functools import partial
 try:
     from json import loads as parse_json, dumps as compile_json
 except ImportError:
@@ -275,3 +276,20 @@ if not hasattr(os.path, 'relpath'):
             return os.path.join(*rel_list)
 else:
     from os.path import relpath
+
+#TODO run this thing with a multiprocess pool
+class Pool(object):
+    """
+    a dummy pool that has the same interface as the gevent pool
+    it collects all tasks and then runs them in sync
+    """
+    def __init__(self, *args, **kwargs):
+        self.tasks = []
+
+    def spawn(self,task, *args):
+        self.tasks.append(partial(task, *args))
+
+    def join(self):
+        for task in self.tasks:
+            task()
+

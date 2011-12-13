@@ -4,16 +4,22 @@ import getpass
 import fnmatch
 import os
 import re
-from gevent import monkey;monkey.patch_all()
-from gevent import pool
+from txclib.log import logger
 
+try:
+    #try to speedup things
+    import gevent
+    from gevent import monkey;monkey.patch_all()
+    from gevent.pool import Pool
+except ImportError:
+    logger.info("Unable to import gevent")
+    from utils import Pool
 import urllib2
 import datetime, time
 import ConfigParser
 
 from txclib.config import OrderedRawConfigParser
 from txclib.config import Flipdict
-from txclib.log import logger
 from txclib.urls import API_URLS
 from txclib.utils import color_text
 from txclib.utils import ERRMSG
@@ -33,7 +39,6 @@ PARALLEL_API_REQUESTS = 16
 
 class ProjectNotInit(Exception):
     pass
-
 
 class Project(object):
     """
@@ -299,7 +304,7 @@ class Project(object):
         """
         Pull all translations file from transifex server
         """
-        api_pool = pool.Pool(PARALLEL_API_REQUESTS)
+        api_pool = Pool(PARALLEL_API_REQUESTS)
         self.minimum_perc = minimum_perc
         _locals = locals()
         if resources:
